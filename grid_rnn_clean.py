@@ -12,8 +12,8 @@
 # | Output every step | (x, y) position after that step |
 # | Walls | near a wall, a heading pointing into it is reflected away, so the agent never leaves the arena |
 # | Stillness | 90% of speed inputs are 0 |
-# | RNN | vanilla leaky tanh RNN, 1 layer, 512 units, leak alpha = 0.1 |
-# | Loss | MSE + L1 firing-rate penalty + L2 weight penalty (W_in, W_rec, W_out) |
+# | RNN | vanilla leaky tanh RNN, 1 layer, 100 units (scale up later), leak alpha = 0.1 |
+# | Loss | MSE + L2 firing-rate penalty + L2 weight penalty on W_in and W_out (as in Cueva & Wei) |
 #
 # **Why the position is given only at t = 0:** if the network saw its true position every step, it
 # could just add the velocity to it. Nothing would need to be integrated or remembered, and
@@ -71,7 +71,7 @@ class SpaceConfig:
 
 @dataclass
 class RNNConfig:
-    n_hidden: int = 512             # paper: 100; project spec: 512
+    n_hidden: int = 100             # paper: 100. Start here, scale up (e.g. 512) only if needed
     alpha: float = 0.1              # Euler step / time constant (paper: step = tau/10)
     noise_std: float = 0.05         # recurrent noise. Paper: constant, exact value not important
     expansion_dim: int = 0          # 0 = off (Cueva & Wei). >0 adds a FIXED random ReLU layer in
@@ -86,14 +86,16 @@ class GridTrainConfig:
     seq_len: int = 100              # velocity inputs per trajectory (project spec; paper: 500)
     batch_size: int = 128           # paper: 500 with Hessian-free. Smaller for CPU
     n_steps: int = 5000             # optimizer steps (our choice)
-    lr: float = 1e-3                # Adam. The paper used Hessian-free optimization, which PyTorch
-                                    # doesn't have. If grid cells don't appear, the optimizer and the
-                                    # regularization strength are the first suspects
+    lr: float = 1e-3                # Adam at its default settings (lr 1e-3) with gradient-norm clipping
+                                    # at 1, as in Fascianelli et al. 2024. Cueva & Wei used Hessian-free
+                                    # optimization, which PyTorch doesn't have. If grid cells don't
+                                    # appear, the optimizer and regularization strength are suspects
     grad_clip: float = 1.0
     l2_weight: float = 1e-4         # L2 weight penalty: mean squared weight, summed over l2_targets
-    l2_targets: tuple = ("W_in", "W_rec", "W_out")
+    l2_targets: tuple = ("W_in", "W_out")   # Cueva & Wei eq. 4: input and output weights only, NOT W_rec
                                     # paper eq. 4 penalizes W_in and W_out; project spec adds W_rec
-    rate_penalty: str = "l1"        # "l1": mean |rate| (project spec); "l2": mean rate^2 (paper)
+    rate_penalty: tuple = ("l2",)   # Cueva & Wei eq. 5: squared rates. Also allowed: ("l1",), ("l1", "l2").
+                                    # With both, each gets half of the fr_ratio budget.
     fr_ratio: float = 0.1           # firing-rate penalty is scaled to ~fr_ratio x position error.
                                     # Paper keeps it between error/10 and error/3. THE MOST IMPORTANT
                                     # KNOB FOR GRID EMERGENCE (paper sec 3.2)
@@ -469,7 +471,7 @@ def axis_split_generalization(reps, latents):
 
 # %% [markdown]
 # ## E. Loss, training loop, evaluation
-# Loss = MSE + L1 firing-rate penalty + L2 weight penalty.
+# Loss = MSE + L1 and/or L2 firing-rate penalty + L2 weight penalty.
 
 # %%
 def compute_loss(outputs, target, rates, model, tcfg):
@@ -479,24 +481,24 @@ def compute_loss(outputs, target, rates, model, tcfg):
     Returns (total_loss, dict of components for logging).
 
     Loss = MSE(position)
-         + fr_weight * firing-rate penalty  (L1: mean |rate| over batch, time and units;
-                                             or L2: mean rate^2)
+         + firing-rate penalties            (L1: mean |rate| over batch, time and units;
+                                             L2: mean rate^2; any combination)
          + l2_weight * weight penalty       (mean squared weight of each matrix in l2_targets, summed)
 
     fr_weight is set adaptively so that penalty ~= fr_ratio * position error (an approximation
     of the paper's "between error/10 and error/3" schedule).
     """
     mse = F.mse_loss(outputs, target)
-    if tcfg.rate_penalty == "l1":
-        r_fr = rates.abs().mean()
-    elif tcfg.rate_penalty == "l2":
-        r_fr = (rates ** 2).mean()
-    else:
-        raise ValueError(f"unknown rate_penalty {tcfg.rate_penalty}")
+    kinds = (tcfg.rate_penalty,) if isinstance(tcfg.rate_penalty, str) else tuple(tcfg.rate_penalty)
+    terms = {"l1": rates.abs().mean(), "l2": (rates ** 2).mean()}
+    if not kinds or any(k not in terms for k in kinds):
+        raise ValueError(f"rate_penalty must be made of 'l1'/'l2', got {tcfg.rate_penalty}")
     r_l2 = sum((getattr(model, name).weight ** 2).mean() for name in tcfg.l2_targets)
-    fr_weight = tcfg.fr_ratio * mse.detach() / (r_fr.detach() + 1e-8)
-    total = mse + fr_weight * r_fr + tcfg.l2_weight * r_l2
-    return total, {"mse": mse.item(), "fr": r_fr.item(), "l2": r_l2.item()}
+    # Each rate penalty is rescaled on the fly to (fr_ratio / number of penalties) x position error.
+    fr_total = sum((tcfg.fr_ratio / len(kinds)) * mse.detach() / (terms[k].detach() + 1e-8) * terms[k]
+                   for k in kinds)
+    total = mse + fr_total + tcfg.l2_weight * r_l2
+    return total, {"mse": mse.item(), "fr": fr_total.item(), "l2": r_l2.item()}
 
 
 def train(model, scfg, tcfg, rng, device="cpu"):
