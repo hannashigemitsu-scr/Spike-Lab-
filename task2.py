@@ -240,7 +240,7 @@ class PathIntegratorRNN(nn.Module):
         x_t   = (1 - alpha) * x_{t-1} + alpha * drive # leaky update
         y_t   = W_out tanh(x_t)                       # position readout (no bias)
 
-    Plain language: each unit holds a "memory" x that slowly leaks away (alpha = 0.1: it keeps
+    each unit holds a "memory" x that slowly leaks away (alpha = 0.1: it keeps
     90% of its old state and takes in 10% of its new drive). Its firing rate is tanh of that
     memory, and the position readout is a weighted sum of firing rates.
 
