@@ -1,16 +1,11 @@
 """Task 1 (non-navigation): color, delay, shape, delay, go  ->  the (x, y) position that (color, shape) names.
 
-Hypothesis: no grid cells. One self-contained file: settings, task, network, training, analysis.
+Hypothesis: no grid cells. 
 Needs: numpy, scipy, scikit-learn, matplotlib, torch.
 
     python task1_color_shape_position.py train   --out runs/task1
     python task1_color_shape_position.py analyze --run runs/task1
     python task1_color_shape_position.py train   --out runs/quick --set train.n_steps=500      # quick check
-
-`--set section.key=value` changes any setting in the Settings block below for one run
-(for example `--set rnn.n_hidden=512 seed=3`; list values are comma separated:
-`--set train.rate_penalty=l1,l2`). `train` writes <out>/model.pt (weights + all settings + seed)
-and history.json; `analyze` writes figures and summary.json to <run>/analysis_*/.
 
 THE TASK
   Each (color, shape) pair names one cell of a 16 x 16 grid laid over the 16 x 16 arena
@@ -35,7 +30,7 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 import matplotlib
-matplotlib.use("Agg")                      # write figures to files; no window needed
+matplotlib.use("Agg")                      
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -85,7 +80,7 @@ class CueConfig:
     n_shapes: int = 16              # shape index -> y coordinate
     stim_dur: int = 10              # steps each cue is shown (leak 0.1 -> time constant ~10)
     delay_min: int = 10             # every delay is drawn from [delay_min, delay_max],
-    delay_max: int = 20             # freshly for every delay of every trial
+    delay_max: int = 20             # for every delay of every trial
     resp_dur: int = 10              # steps the go cue is on; output scored only here
 
 
@@ -99,7 +94,7 @@ class AnalysisConfig:
 
 @dataclass
 class Config:
-    seed: int = 0
+    seed: int = 0                   # sets default random seed, ensures reproducibility             
     space: SpaceConfig = field(default_factory=SpaceConfig)
     rnn: RNNConfig = field(default_factory=RNNConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
@@ -130,7 +125,7 @@ def apply_overrides(cfg, items):
             continue
         section, _, name = key.partition(".")
         obj = getattr(cfg, section)
-        old = getattr(obj, name)                     # AttributeError = unknown setting
+        old = getattr(obj, name)                     
         if isinstance(old, tuple):
             new = tuple(x.strip() for x in raw.split(","))
         elif isinstance(old, bool):
@@ -173,11 +168,11 @@ def generate_trials(n, cfg, rng, device="cpu", colors=None, shapes=None):
         inputs (n, T, 35), target (n, T, 2), mask (n, T) = 1 during the response epoch,
         goal (n, 2), color, shape, onsets (n, 3) = start step of color, shape, go (numpy).
     Shorter trials are padded with zeros at the end up to T, the longest possible trial."""
-    cue = cfg.cue
+    cue = cfg.cue    #pulls out the task config with timing rules and feature counts 
     T = trial_length(cue)
     colors = rng.integers(0, cue.n_colors, size=n) if colors is None else np.asarray(colors)
     shapes = rng.integers(0, cue.n_shapes, size=n) if shapes is None else np.asarray(shapes)
-    goal = goal_position(colors, shapes, cue, cfg.space.arena_size)
+    goal = goal_position(colors, shapes, cue, cfg.space.arena_size)    #computes the x y coordinate target
 
     # start time of every event: color, shape, go. Each cue lasts stim_dur, then a random delay.
     delays = rng.integers(cue.delay_min, cue.delay_max + 1, size=(n, 2))
@@ -185,20 +180,20 @@ def generate_trials(n, cfg, rng, device="cpu", colors=None, shapes=None):
     for k in range(1, 3):
         onsets[:, k] = onsets[:, k - 1] + cue.stim_dur + delays[:, k - 1]
 
-    shape0, go = cue.n_colors, cue.n_colors + cue.n_shapes + 2
+    shape0, go = cue.n_colors, cue.n_colors + cue.n_shapes + 2    #starting index column in the input vector w/specific input for go
     inputs = np.zeros((n, T, n_inputs(cue)), dtype=np.float32)
     target = np.zeros((n, T, 2), dtype=np.float32)
     mask = np.zeros((n, T), dtype=np.float32)
     sd, rd = cue.stim_dur, cue.resp_dur
-    for i in range(n):
+    for i in range(n):    
         t = onsets[i]
         inputs[i, t[0]:t[0] + sd, colors[i]] = 1.0
         inputs[i, t[1]:t[1] + sd, shape0 + shapes[i]] = 1.0
         inputs[i, t[2]:t[2] + rd, go] = 1.0
-        mask[i, t[2]:t[2] + rd] = 1.0
-        target[i, t[2]:t[2] + rd] = goal[i]
+        mask[i, t[2]:t[2] + rd] = 1.0    #sets to 1 only during response window, tells the loss func to penalize only when the model is supposed to be outputting final pos
+        target[i, t[2]:t[2] + rd] = goal[i]    #assigns correct 2D goal coordinates across that same response time window
 
-    to_t = lambda a: torch.as_tensor(a, dtype=torch.float32, device=device)
+    to_t = lambda a: torch.as_tensor(a, dtype=torch.float32, device=device)    #creates lambda func to cast arrays into appropriate pytorch tensor 
     return {"inputs": to_t(inputs), "target": to_t(target), "mask": to_t(mask),
             "goal": goal, "color": colors, "shape": shapes, "onsets": onsets}
 
@@ -223,7 +218,7 @@ class PathIntegratorRNN(nn.Module):
         x_t   = (1 - alpha) * x_{t-1} + alpha * drive # leaky update
         y_t   = W_out tanh(x_t)                       # position readout (no bias)
 
-    Plain language: each unit holds a "memory" x that slowly leaks away (alpha = 0.1: it keeps
+    Each unit holds a "memory" x that slowly leaks away (alpha = 0.1 meaning it keeps
     90% of its old state and takes in 10% of its new drive). Its firing rate is tanh of that
     memory, and the position readout is a weighted sum of firing rates.
 
